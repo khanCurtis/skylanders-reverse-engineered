@@ -1,17 +1,13 @@
-# Build output
-/build/
-/target/
-/cmake-build-*/
-
 # Rust
 Cargo.lock
 
 # Dumps / proprietary
-/dumps/
-/game/
-/assets/
-/extracted/
-/private
+**/dumps/
+**/game/
+**/assets/
+**/extracted/
+**/converted/
+**/private
 
 # Xbox Files
 *.iso
@@ -22,6 +18,13 @@ Cargo.lock
 # Generated Files
 *.log
 *.tmp
+
+# Build Artifacts
+build/
+**/build/
+target/
+**/target/
+cmake-build*/
 
 # IDE
 .vscode/
