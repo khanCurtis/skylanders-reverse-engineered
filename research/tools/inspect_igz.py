@@ -526,6 +526,60 @@ class IGZFile:
                     )
                 )
 
+    # Research dumps
+    def dump_fixup_data(self, fixup_name: str) -> None:
+        """
+        Hex/word dump the data region belonging to a named fixup.
+
+        This is intentionally a research aid. It does not interpret the
+        bytes beyond the fixup header itself.
+        """
+        target = next(
+            (f for f in self.fixups if magic_name(f.magic) == fixup_name),
+            None,
+        )
+
+        if target is None:
+            print(f"\n{fixup_name}")
+            print("─" * 64)
+            print("Fixup not found.")
+            return
+
+        start = target.data_offset
+        end = start + target.length - target.start_of_data
+
+        print(f"\n{fixup_name} Raw Data")
+        print("─" * 64)
+        print(
+            f"fixup:  0x{target.offset:X} "
+            f"count={target.count} "
+            f"length=0x{target.length:X}"
+        )
+        print(
+            f"data:   0x{start:X}..0x{end:X} "
+            f"({end - start} bytes)"
+        )
+
+        for offset in range(start, end, 16):
+            chunk = self.data[offset:min(offset + 16, end)]
+
+            hex_part = " ".join(f"{b:02X}" for b in chunk)
+            hex_part = f"{hex_part:<47}"
+
+            ascii_part = "".join(
+                chr(b) if 32 <= b < 127 else "."
+                for b in chunk
+            )
+
+            print(
+                f"{offset:08X}  {hex_part}  |{ascii_part}|"
+            )
+
+        print("\n32-bit words:")
+        for offset in range(start, end - 3, 4):
+            value = self.reader.u32(offset)
+            print(f"  0x{offset:08X}: 0x{value:08X}")
+
     # Basic igImage2 discovery
     def parse_images(self) -> None:
         """
@@ -765,6 +819,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--dump-fixup",
+        action="append",
+        choices=["TMET", "RVTB", "EXID", "TMHN"],
+        help="Dump raw data for a fixup type; may be repeated.",
+    )
+
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print all available inspection sections",
@@ -797,6 +858,10 @@ def main() -> int:
 
         igz.print_header()
         igz.print_descriptors()
+
+        if args.dump_fixup:
+            for fixup_name in args.dump_fixup:
+                igz.dump_fixup_data(fixup_name)
 
         if args.fixups or args.verbose:
             igz.print_fixups()
