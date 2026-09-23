@@ -40,10 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
-
 IGZ_MAGIC_LE = b"IGZ\x01"
 IGZ_MAGIC_BE = b"\x01ZGI"
 
@@ -96,10 +93,7 @@ IGZ_LOCATIONS: dict[int, tuple[int, int, int, int]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Data classes
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Descriptor:
     index: int
@@ -150,10 +144,7 @@ class ImageInfo:
     tmhn_index: int | None
 
 
-# ---------------------------------------------------------------------------
 # Reader
-# ---------------------------------------------------------------------------
-
 class Reader:
     """
     Minimal endian-aware reader.
@@ -183,10 +174,7 @@ class Reader:
             )
 
 
-# ---------------------------------------------------------------------------
 # Utility functions
-# ---------------------------------------------------------------------------
-
 def magic_name(magic: int) -> str:
     names = {
         TSTR_MAGIC: "TSTR",
@@ -226,10 +214,7 @@ def is_plausible_offset(value: int, file_size: int) -> bool:
     return 0 <= value < file_size
 
 
-# ---------------------------------------------------------------------------
 # IGZ parsing
-# ---------------------------------------------------------------------------
-
 class IGZFile:
     def __init__(self, path: Path):
         self.path = path
@@ -268,10 +253,7 @@ class IGZFile:
         self.tmhn_entries: list[TMHNEntry] = []
         self.images: list[ImageInfo] = []
 
-    # ------------------------------------------------------------------
     # Header
-    # ------------------------------------------------------------------
-
     def parse_descriptors(self) -> None:
         if self.version not in IGZ_LOCATIONS:
             raise ValueError(
@@ -311,10 +293,7 @@ class IGZFile:
                     "may be incorrect."
                 )
 
-    # ------------------------------------------------------------------
     # Fixups
-    # ------------------------------------------------------------------
-
     def parse_fixups(self) -> None:
         if not self.descriptors:
             raise ValueError("Descriptors must be parsed first.")
@@ -326,33 +305,79 @@ class IGZFile:
 
     def parse_old_fixups(self) -> None:
         """
-        Reproduce the structure used by IGZ_File.ReadOldFixups().
+        Parse the v5/v6 legacy fixup table.
 
-        For v5/v6:
+        For old IGZ files, the first DWORD at each fixup location is not
+        the four-character fixup magic. It is a numeric fixup ID.
 
-            descriptor[0] + 0x1C
+        The IDs observed/handled by igArchiveExtractor include:
 
-        is the start of the old fixup/tag stream.
+            0x00 -> TMET
+            0x01 -> TSTR
+            0x02 -> EXID
+            0x03 -> EXNM
+            0x05 -> RVTB
+            0x0A -> TMHN
+            0x0C -> MTSZ
+            0x0E -> RSTR
 
-        The old fixup's header is interpreted by IGZ_Fixup.Process():
-
-            magic
-            unknown
-            unknown
-            count
-            length
-            startOfData
+        IGZ_Fixup.Process() then parses the common fixup header.
         """
 
-        descriptor = self.descriptors[0]
+        if not self.descriptors:
+            raise ValueError("Descriptors must be parsed first.")
 
-        pos = descriptor.offset + IGZ_LOCATIONS[self.version][2]
-        end = descriptor.end
+        descriptor0 = self.descriptors[0]
 
-        while pos < end:
+        # Matches:
+        #
+        # uint bytesPassed = IGZ_Structure.locations[version][0x02];
+        #
+        bytes_passed = IGZ_LOCATIONS[self.version][2]
+
+        # Matches:
+        #
+        # uint numberOfFixups =
+        #     ebr.ReadUInt32WithOffset(descriptors[0].offset + 0x10);
+        #
+        number_of_fixups = self.reader.u32(descriptor0.offset + 0x10)
+
+        old_fixup_names = {
+            0x00: "TMET",
+            0x01: "TSTR",
+            0x02: "EXID",
+            0x03: "EXNM",
+            0x05: "RVTB",
+            0x0A: "TMHN",
+            0x0C: "MTSZ",
+            0x0E: "RSTR",
+        }
+
+        for index in range(number_of_fixups):
+            pos = descriptor0.offset + bytes_passed
+
+            self.reader.check(pos, 4)
+
+            fixup_id = self.reader.u32(pos)
+
+            # IGZ_Fixup.Process():
+            #
+            #   sh.BaseStream.Seek(-4, Current)
+            #   magicNumber = sh.ReadUInt32()
+            #   offset = Position - 4
+            #
+            # For the old format, the ID is consumed as part of the
+            # specialized fixup's common header.
+            #
+            # The next fields are:
+            #
+            #   +0x04 unknown / reserved
+            #   +0x08 unknown / reserved
+            #   +0x0C count
+            #   +0x10 length
+            #   +0x14 startOfData
+            #
             self.reader.check(pos, 0x18)
-
-            magic = self.reader.u32(pos)
 
             count = self.reader.u32(pos + 0x0C)
             length = self.reader.u32(pos + 0x10)
@@ -360,14 +385,29 @@ class IGZFile:
 
             if length == 0:
                 raise ValueError(
-                    f"Zero-length old fixup at 0x{pos:X}"
+                    f"Zero-length old fixup #{index} "
+                    f"at 0x{pos:X}"
                 )
 
             if pos + length > len(self.data):
                 raise ValueError(
-                    f"Fixup at 0x{pos:X} extends outside the file: "
+                    f"Old fixup #{index} at 0x{pos:X} "
+                    f"extends outside the file: "
                     f"length=0x{length:X}"
                 )
+
+            # Convert the old numeric ID into the real four-character
+            # magic used by the parsed fixup object.
+            magic_map = {
+                0x00: TMET_MAGIC,
+                0x01: TSTR_MAGIC,
+                0x02: EXID_MAGIC,
+                0x03: EXNM_MAGIC,
+                0x05: RVTB_MAGIC,
+                0x0A: TMHN_MAGIC,
+            }
+
+            magic = magic_map.get(fixup_id, fixup_id)
 
             fixup = Fixup(
                 magic=magic,
@@ -375,12 +415,21 @@ class IGZFile:
                 count=count,
                 length=length,
                 start_of_data=start_of_data,
-                kind="old",
+                kind=f"old:{old_fixup_names.get(fixup_id, 'UNKNOWN')}",
             )
 
             self.fixups.append(fixup)
 
-            pos += length
+            # Exactly matches:
+            #
+            # bytesPassed += fixups.Last().length;
+            #
+            bytes_passed += length
+
+        if index + 1 != number_of_fixups:
+            raise ValueError(
+                "Old fixup count did not complete as expected."
+            )
 
     def parse_new_fixups(self) -> None:
         """
@@ -427,10 +476,7 @@ class IGZFile:
 
             pos += length
 
-    # ------------------------------------------------------------------
     # TMHN
-    # ------------------------------------------------------------------
-
     def parse_tmhn(self) -> None:
         """
         Parse TMHN entries and resolve their descriptor-relative offsets.
@@ -480,10 +526,7 @@ class IGZFile:
                     )
                 )
 
-    # ------------------------------------------------------------------
     # Basic igImage2 discovery
-    # ------------------------------------------------------------------
-
     def parse_images(self) -> None:
         """
         Locate igImage2 objects using the TMET/RVTB relationship used by
@@ -534,20 +577,21 @@ class IGZFile:
         # silently guessing at object layouts.
         return
 
-    # ------------------------------------------------------------------
     # Full parse
-    # ------------------------------------------------------------------
-
     def parse(self) -> None:
+        """
+        Parse the IGZ structure in dependency order.
+
+        Descriptors must exist before fixups can be interpreted.
+        TMHN must exist before texture references can be displayed.
+        """
+
         self.parse_descriptors()
         self.parse_fixups()
         self.parse_tmhn()
         self.parse_images()
 
-    # ------------------------------------------------------------------
     # Output
-    # ------------------------------------------------------------------
-
     def print_header(self) -> None:
         print("IGZ")
         print("─" * 64)
@@ -696,10 +740,7 @@ class IGZFile:
             )
 
 
-# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------------------------------------
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Inspect Vicarious Visions Alchemy IGZ files."
